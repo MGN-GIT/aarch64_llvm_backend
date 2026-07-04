@@ -633,3 +633,144 @@ What occurs:
 1. `x16` = Effective Address (no offset added yet)
 2. Word value at the Effective Address is loaded into w5
 3. x16 is then incremented by `0x3C` — it holds the new value if the instruction executes again
+
+### Note:
+* Post-index: Access first, then update.
+* Pre-index: Update first, then access.
+---
+
+## Loops
+
+Loops transfer (copy-paste) a chunk of data from one area of memory to another. You need 4 items to write a loop:
+
+1. Start Address where Contents are originally at (Source Address)
+2. Start Address where you want Contents copied to (Destination Address)
+3. Length of the Contents, tracked via a GPR ("loop tracker" — how many times the loop executes)
+4. A Conditional Branch
+
+Consider the size of the contents when deciding transfer granularity. If it divides evenly by 8, transferring double-words at a time makes sense. If it's an odd size like 29 bytes, transfer byte-per-byte.
+
+### Building a byte-copy loop (29 bytes)
+
+Source Address = `0x40007F0000`, Destination Address = `0x4000800000`. Place Source in x1, Destination in x2:
+
+```
+// Write x1 (Source) Address
+ldr x1, =0x40007F0000
+
+// Write x2 (Destination) Address
+ldr x2, =0x4000800000
+```
+
+Set a Loop Tracker register (w3) to 29, since we're transferring 29 bytes one at a time:
+
+```
+mov w3, #29
+```
+
+Load and store one byte at a time, using post-indexed addressing (offset `#1`) so both addresses auto-increment after each transfer. w4 is used as the scratch register:
+
+```
+ldrb w4, [x1], #1   // Load byte
+strb w4, [x2], #1   // Store byte
+```
+
+Decrement the tracker and branch back while it's not zero:
+
+```
+sub w3, w3, #1   // Decrement Loop Tracker
+cmp w3, #0       // Check when Tracker hits 0
+bne loop         // When not zero, we still have bytes to transfer
+```
+
+The `loop` label must land at the `ldrb` instruction — **not** at the top where the addresses are set. Landing at the top would reset the post-indexed addresses every iteration, causing an infinite loop:
+
+```
+loop:
+ldrb w4, [x1], #1   // Load byte
+strb w4, [x2], #1   // Store byte
+sub w3, w3, #1      // Decrement Loop Tracker for every Byte Transferred
+cmp w3, #0          // Check when Tracker hits 0
+bne loop            // When not zero, we still have bytes to transfer
+```
+
+**Shortcut:** appending `s` to an instruction (e.g. `subs`) gives you a free `cmp rD, #0` on the result, letting you drop the separate `cmp`:
+
+```
+subs w3, w3, #1   // Perform the sub, then perform "cmp w3, #0"
+bne loop
+```
+
+**Full loop:**
+
+```
+// Write x1 (Source) Address
+ldr x1, =0x40007F0000
+
+// Write x2 (Destination) Address
+ldr x2, =0x4000800000
+
+// Set Loop Tracker
+mov w3, #29
+
+// Loop
+loop:
+ldrb w4, [x1], #1   // Load byte
+strb w4, [x2], #1   // Store byte
+subs w3, w3, #1     // Decrement Loop Tracker, and Compare w3 to 0
+bne loop            // When not zero, we still have bytes to transfer
+```
+
+**What happens per iteration:**
+1. `ldrb` loads a byte into w4; x1 post-increments by 1.
+2. `strb` stores the byte from w4; x2 post-increments by 1.
+3. `subs` decrements w3 by 1 and sets flags as if `cmp w3, #0` ran.
+4. `bne` branches back to `loop` if w3 isn't 0 yet — otherwise the loop ends.
+
+### Exercise: Fibonacci sequence (stop above 1000)
+
+Requirements:
+- A register for addition variable #1, starting at 0
+- A register for addition variable #2, starting at 1
+- A register to hold the addition result
+- A backward conditional branch (loop)
+
+```
+mov w0, #0        // Variable #1
+mov w1, #1        // Variable #2
+do_fibonacci:
+add w2, w0, w1    // Perform the addition. Result goes into w2
+cmp w2, #1000     // Compare result to 1,000
+bhi done          // If greater than 1000, *stop* the Fibonacci sequence
+mov w0, w1        // Previous result now becomes Variable #1
+mov w1, w2        // Latest result now becomes Variable #2
+b do_fibonacci    // Do the Fibonacci sequence again
+done:             // End of code
+```
+
+**Why `bhi` instead of `bgt`:** the running Fibonacci result is always positive (it starts at 1 and only grows), so negative numbers are never possible — treat the comparison as **Unsigned**. Default to `bhi`/`blo` over `bgt`/`blt` unless you specifically know negative numbers are possible and want them treated as negative.
+
+**Why the label placement matters:** `do_fibonacci:` sits right before the `add`, not at the very top of the source. If it were at the top, `w0`/`w1` would reset to 0/1 every iteration, w2 would never exceed 1000, and you'd get an infinite loop.
+
+**Why two `mov`s before looping back:** the next addition needs to be *previous result + latest result*. `mov w0, w1` shifts the old latest result into variable #1; `mov w1, w2` makes the newest result variable #2 for the next pass.
+
+**Full source example:**
+
+```
+.section .text
+.globl _start
+_start:
+nop                    // For possible GDB Registers Unavailable bug
+mov w0, #0             // Variable #1
+mov w1, #1             // Variable #2
+do_fibonacci:
+add w2, w0, w1         // Perform the addition. Result goes into w2
+cmp w2, #1000          // Compare result to 1,000
+bhi done               // If greater than 1000, stop the Fibonacci sequence
+mov w0, w1             // Previous result now becomes Variable #1
+mov w1, w2             // Latest result now becomes Variable #2
+b do_fibonacci         // Do the Fibonacci sequence again
+done:                  // End of code
+```
+
+Once w2 exceeds 1000, continuing to step will fault the program.
