@@ -550,4 +550,86 @@ Once you step past the `str` instruction, the program will fault.
 - A conditional branch always analyzes the results from the **MOST RECENT** compare instruction.
 - Official ARM format requires a dot after the `b` (e.g. `b.ne`). Most assemblers let you omit it, but GDB will still display the dot when disassembling conditional branches.
 
-  
+  ---
+  ## Pre and Post Index of Loads/Stores
+
+Loads and Stores can have additional operations done to them to update the Source Register's Address immediately *after* the instruction has executed. This is useful for things like loops.
+
+- **Pre-Indexing** = Load/Store to the Effective Address, then increase/decrease the Source Register Address/Value by the Immediate Value present in the instruction.
+- **Post-Indexing** = Load/Store to the Source Register Address, then increase/decrease the Source Register Address/Value by the Immediate Value present in the instruction.
+
+### Pre-Index Store
+
+```
+str x0, [x1, #0x4]!
+```
+
+The `!` at the end marks this as a pre-index store.
+
+What occurs:
+1. `x1 + 0x4` = Effective Address
+2. x0 (entire double-word) is stored at the Effective Address
+3. x1 is then incremented by `0x4` — it holds the new value if the instruction executes again
+
+**Worked example:**
+
+```
+str x0, [x1, #0x4]!
+
+x0 = 5
+x1 = 0x40008002B0
+```
+
+- Effective Address = `x1 + 4` = `0x40008002B4`
+- x0 is stored to `0x40008002B4`
+- x1 is updated to `0x40008002B4` after the store
+- Because of Little Endian, the value in memory becomes `0x0500000000000000`
+
+### Post-Index Store
+
+```
+str x0, [x1], #0x4
+```
+
+Note: only the Source Register is inside the brackets; the Immediate Value comes after a second comma.
+
+What occurs:
+1. `x1` = Effective Address (no offset added yet)
+2. x0 (entire double-word) is stored at the Effective Address
+3. x1 is then incremented by `0x4` — it holds the new value if the instruction executes again
+
+**Worked example:**
+
+```
+str x0, [x1], #0x4
+
+x0 = 5
+x1 = 0x40008002B0
+```
+
+- Effective Address = `x1` = `0x40008002B0`
+- x0 is stored at `0x40008002B0` **before** x1 is incremented
+- x1 is then incremented by 4, becoming `0x40008002B4`
+- Because of Little Endian, the value in memory becomes `0x0500000000000000`
+
+### Pre-Index Load
+
+```
+ldr w5, [x16, #0x3C]!
+```
+
+What occurs:
+1. `x16 + 0x3C` = Effective Address
+2. Word value at the Effective Address is loaded into w5
+3. x16 is then incremented by `0x3C` — it holds the new value if the instruction executes again
+
+### Post-Index Load
+
+```
+ldr w5, [x16], #0x3C
+```
+
+What occurs:
+1. `x16` = Effective Address (no offset added yet)
+2. Word value at the Effective Address is loaded into w5
+3. x16 is then incremented by `0x3C` — it holds the new value if the instruction executes again
