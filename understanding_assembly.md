@@ -382,7 +382,172 @@ The below is a summary of the above tutorial.
   ```
   str x9, [x22]
   ```
+---
+## Compares and Branches
 
-  ---
+Compares and Branches let you create conditional paths in your program (if/else logic).
+
+### Unconditional Branch
+
+```
+b SIMM
+b label
+```
+
+- "Unconditional" means the branch always executes, regardless of any condition.
+- SIMM determines how far to jump. Any instructions jumped over do **NOT** execute.
+- Since every ARM64 instruction is 4 bytes, a SIMM of `0x4` is useless — it just goes to the very next instruction.
+- Branch instructions use a SIMM value, so backward branches are possible.
+- Labels let the Assembler calculate the SIMM for you. Any name is fine as long as special characters (e.g. `$`) are omitted.
+- When you supply a label, its "landing spot" must repeat the exact label name, appended with a colon:
+
+```
+b jump_here
+
+add w13, w14, w15
+
+jump_here:
+mov x1, #1
+```
+
+### Conditional Branches
+
+Conditional branches only execute based on an 'if' — they require a comparison instruction beforehand.
+
+**Compare instruction:**
+
+```
+cmp xD, aimm
+cmp wD, aimm
+cmp xD, xA
+cmp wD, wA
+```
+
+Compares the Destination Register against the Immediate Value / Source Register and sets condition flags for the next conditional branch to read.
+
+**Example — Branch If Equal:**
+
+```
+cmp x0, #0
+beq jump_here
+
+add w1, w2, w3
+
+jump_here:
+str x7, [x7]
+```
+
+If x0 is 0:
+1. `cmp` executes, sets condition flags.
+2. `beq` is taken (x0 IS equal to 0).
+3. Execution jumps over the `add` and lands at `str`.
+4. `str` executes.
+
+If x0 is NOT 0:
+1. `cmp` executes, sets condition flags.
+2. `beq` is NOT taken.
+3. Execution falls through normally.
+4. `add` executes, then `str` executes.
+
+**A slightly larger example:**
+
+```
+cmp x0, #0
+beq condition_met
+
+mov x1, #1
+b the_end
+
+condition_met:
+strh w1, [x2]
+
+the_end:
+str x3, [x4, #0x40]
+```
+
+### Signed vs Unsigned Treatment of Values
+
+Conditional branches determine whether the values in the most recent `cmp` are treated as Signed or Unsigned — the register itself doesn't decide this, the branch mnemonic does.
+
+```
+bhs label   // Branch if Greater than or Equal to (Unsigned)
+bgt label   // Branch if Greater than (Signed)
+```
+
+**Full list of conditional branch instructions:**
+
+```
+beq = Equal
+bne = Not Equal
+bgt = Greater Than (signed)
+blt = Less Than (signed)
+bge = Greater Than or Equal (signed)
+ble = Less Than or Equal (signed)
+bhs = Unsigned Higher or Same (aka Unsigned Greater Than or Equal)   // same as bcs
+blo = Unsigned Lower Than (aka Unsigned Less Than)                    // same as bcc
+bmi = Negative
+bpl = Positive or Zero (aka Not Negative)
+bvs = Signed Overflow
+bvc = Not Signed Overflow
+bhi = Unsigned Higher (aka Unsigned Greater Than)
+bls = Unsigned Lower or Same (aka Unsigned Less Than or Equal)
+bcs = Same as bhs (branch Carry Set)
+bcc = Same as blo (branch Carry Clear)
+bal = Always (same as an unconditional branch)
+```
+
+**Worked example — signed vs unsigned changes the outcome:**
+
+```
+w2  = 0xFFFFFFFF
+w19 = 0x000000A0
+
+cmp w2, w19   // Compare w2 vs w19
+
+bgt somewhere   // Signed: w2 = -1, w19 = 160 -> -1 is NOT > 160 -> branch NOT taken
+bhi somewhere   // Unsigned: w2 = 4294967295, w19 = 160 -> branch IS taken
+```
+
+### Exercise: conditional multiply
+
+Goal: load a word, multiply it by 13 only if it's 0 or positive, then store it back. Assume the word value is at the address in x12. Use w6 and w7 for the multiplication.
+
+```
+ldr w6, [x12]     // Load our value from memory into w6
+cmp w6, #0        // Compare value in w6 against Zero
+blt done          // If w6 < 0 (signed), branch to "done:" - skip the multiply
+mov w7, #13       // Place the multiple into w7 (mul can't use an immediate directly)
+mul w6, w6, w7    // w6 = w6 * w7
+str w6, [x12]     // Store new value back to where we loaded it from
+done:
+```
+
+**Full source example:**
+
+```
+section .data
+data_pointer
+.long 0x00000000   // EDIT THIS TO YOUR LIKING BEFORE ASSEMBLING
+
+.section .text
+.globl _start
+_start:
+nop                     // For possible GDB Registers Unavailable bug
+adr x12, data_pointer
+ldr w6, [x12]     // Load our value from memory into w6
+cmp w6, #0        // Compare value in w6 against Zero
+blt done          // If w6 < 0 (signed), branch to "done:" - skip the multiply
+mov w7, #13       // Place the multiple into w7
+mul w6, w6, w7    // w6 = w6 * w7
+str w6, [x12]     // Store new value back to where we loaded it from
+done:
+```
+
+Once you step past the `str` instruction, the program will fault.
+
+### Final Notes
+
+- A conditional branch always analyzes the results from the **MOST RECENT** compare instruction.
+- Official ARM format requires a dot after the `b` (e.g. `b.ne`). Most assemblers let you omit it, but GDB will still display the dot when disassembling conditional branches.
 
   
