@@ -2,9 +2,6 @@ name: Build LLVM AArch64 Backend
 
 on:
   push:
-    branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 jobs:
