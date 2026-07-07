@@ -1,4 +1,4 @@
-name: Build LLVM AArch64 Backend
+name: Build LLVM AArch64 Backend on ubuntu
 
 on:
   workflow_dispatch:
