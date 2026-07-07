@@ -8,7 +8,7 @@ jobs:
     runs-on: windows-11-arm
 
     steps:
-      - name: Clone LLVM
+      - name: Clone LLVM Source
         run: |
           git clone --depth=1 https://github.com/llvm/llvm-project.git
 
