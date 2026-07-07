@@ -1,7 +1,6 @@
 name: Build LLVM AArch64 Backend
 
 on:
-  push:
   workflow_dispatch:
 
 jobs:
