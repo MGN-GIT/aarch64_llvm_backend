@@ -28,13 +28,14 @@ TODO 1: Handling Condition Select instructions family for Cross-Block optimizati
    * The LLVM compiler currently converts this into the following assembly:
    ```
    Before check(int):
-        sub     sp, sp, #16
-        cmp     w0, #4 <- Look here P1 
+    HBB:
+        cmp     w0, #4          // P1
         cset    w8, gt
-        cmp     w0, #6 <- Look here P2
+        b       TBB
+    
+    TBB:
+        cmp     w0, #6          // P2
         cset    w0, lt
-        str     w8, [sp, #12]
-        add     sp, sp, #16
         ret
    ```
    * Look at P1 and P2 clearly, both cmp instructions compare with imm value 5.
@@ -44,9 +45,13 @@ TODO 1: Handling Condition Select instructions family for Cross-Block optimizati
    * Note: The cross-block or intra-block optimizer applies when the immediate values of the two CMPs differ by 1 or 2
    ```
    After check(int):
+    HBB:
         sub     sp, sp, #16
-        cmp     w0, #5 <- Cross-block optimizer changes imm val to #5
-        cset    w8, gt  
+        cmp     w0, #5          // Cross-block optimizer updates immediate to #5
+        b       TBB
+    
+    TBB:
+        cset    w8, gt
         cset    w0, lt
         str     w8, [sp, #12]
         add     sp, sp, #16
