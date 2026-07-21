@@ -1,5 +1,6 @@
 # AArch64 Register File — Deep Dive
 > Source of truth: `AArch64RegisterInfo.td`
+<img width="481" height="147" alt="image" src="https://github.com/user-attachments/assets/806dbb06-5584-42bd-9c54-6e42c4f6cae3" />
 
 ---
 
