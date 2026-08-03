@@ -1,4 +1,4 @@
-# LLVM AArch64 Compilation Pipeline
+# LLVM AArch64 Compilation Pipeline — Big Picture
 > Key file: `llvm/lib/Target/AArch64/AArch64TargetMachine.cpp` — the `AArch64PassConfig` class
 
 ---
@@ -24,6 +24,7 @@
 - [Where Each Source File Lives in the Pipeline](#where-each-source-file-lives-in-the-pipeline)
 - [How to Read a Pass Name](#how-to-read-a-pass-name)
 - [End-to-End Worked Example](#end-to-end-worked-example)
+- [Files Not Yet Covered](#files-not-yet-covered)
 
 ---
 
@@ -182,24 +183,44 @@ on the IR to prepare it:
 ```
 LLVM IR
   │
-  ├─▶  AArch64ISelLowering        Converts IR constructs that have no direct
-  │                               AArch64 equivalent into ones that do.
-  │                               Examples:
-  │                                 • Lowers calling conventions (which args
-  │                                   go in X0, X1, ... vs the stack)
-  │                                 • Lowers varargs, returns, tail calls
-  │                                 • Lowers memory intrinsics (memcpy, etc.)
+  ├─▶  AArch64ISelLowering.cpp      Converts IR constructs that have no direct
+  │                                 AArch64 equivalent into ones that do.
+  │                                 Examples:
+  │                                   • Lowers calling conventions (which args
+  │                                     go in X0, X1, ... vs the stack)
+  │                                   • Lowers varargs, returns, tail calls
+  │                                   • Lowers memory intrinsics (memcpy, etc.)
   │
-  ├─▶  SVEIntrinsicOpts           Optimises SVE (Scalable Vector Extension)
-  │                               intrinsic calls. For example, removes
-  │                               redundant predicate operations.
+  ├─▶  SVEIntrinsicOpts.cpp         Optimises SVE (Scalable Vector Extension)
+  │                                 intrinsic calls. Removes redundant predicate
+  │                                 operations and simplifies SVE patterns.
   │
-  ├─▶  AArch64StackTagging        Inserts MTE (Memory Tagging Extension)
-  │                               tag instructions for heap/stack safety.
+  ├─▶  SVEShuffleOpts.cpp           Optimises SVE shuffle operations.
+  │                                 Recognises patterns that can be lowered to
+  │                                 cheaper SVE instructions.
   │
-  └─▶  AArch64PromoteConstant     Moves large constants out of the function
-                                  body into a constant pool so they can be
-                                  loaded with a single ADRP+LDR pair.
+  ├─▶  AArch64StackTagging.cpp      Inserts MTE (Memory Tagging Extension)
+  │                                 tag instructions for heap/stack safety.
+  │                                 Runs before register allocation so tags
+  │                                 can be assigned to stack slots.
+  │
+  ├─▶  AArch64StackTaggingPreRA.cpp Second MTE pass — runs just before register
+  │                                 allocation to finalise tag assignments.
+  │
+  ├─▶  AArch64PromoteConstant.cpp   Moves large constants out of the function
+  │                                 body into a constant pool so they can be
+  │                                 loaded with a single ADRP+LDR pair instead
+  │                                 of multiple MOVZ/MOVK instructions.
+  │
+  ├─▶  AArch64TargetTransformInfo.cpp  Answers cost-model questions for the
+  │                                    generic IR optimisers:
+  │                                    "How expensive is this operation on
+  │                                    AArch64?" Used by vectoriser, inliner,
+  │                                    loop unroller to make decisions.
+  │
+  └─▶  AArch64Arm64ECCallLowering.cpp  Lowers calls for the Arm64EC ABI
+                                       (Windows x64-compatible ABI for AArch64).
+                                       Inserts thunks for cross-ABI calls.
 ```
 
 > **Beginner tip:** You do not need to understand all these passes right away.
@@ -279,12 +300,22 @@ LLVM has a newer instruction selection framework called **GlobalISel** that
 works directly on IR-like instructions rather than a DAG. It lives in:
 
 ```
-llvm/lib/Target/AArch64/GISel/
-  ├── AArch64CallLowering.cpp
-  ├── AArch64GlobalISelUtils.cpp
-  ├── AArch64InstructionSelector.cpp   ← the main selector
-  ├── AArch64LegalizerInfo.cpp
-  └── AArch64RegisterBankInfo.cpp
+GISel/
+  ├── AArch64CallLowering.cpp           Lowers calls/returns to real instructions
+  ├── AArch64CallLowering.h
+  ├── AArch64GlobalISelUtils.cpp        Shared utility functions
+  ├── AArch64GlobalISelUtils.h
+  ├── AArch64InstructionSelector.cpp    The main selector — matches generic
+  │                                    MIR ops (G_ADD, G_LOAD...) to real instrs
+  ├── AArch64LegalizerInfo.cpp          Defines which generic ops are legal on
+  ├── AArch64LegalizerInfo.h            AArch64 and how to make illegal ones legal
+  ├── AArch64O0PreLegalizerCombiner.cpp Combines patterns at -O0 before legalise
+  ├── AArch64PostLegalizerCombiner.cpp  Combines patterns after legalisation
+  ├── AArch64PostLegalizerLowering.cpp  Lowers remaining generic ops after legalise
+  ├── AArch64PostSelectOptimize.cpp     Cleans up after instruction selection
+  ├── AArch64PreLegalizerCombiner.cpp   Combines patterns before legalisation
+  ├── AArch64RegisterBankInfo.cpp       Maps virtual regs to register banks
+  └── AArch64RegisterBankInfo.h        (GPR bank vs FPR bank)
 ```
 
 ```
@@ -293,7 +324,28 @@ SelectionDAG path (classic):
 
 GlobalISel path (newer):
   IR → Generic MIR → Legalise → RegBankSelect → Select → MIR
-       (G_ADD, etc.)
+       (G_ADD, etc.)  (make legal)  (GPR or FPR?)  (real instrs)
+```
+
+The GlobalISel pipeline has more explicit stages:
+
+```
+Generic MIR
+  │
+  ├─▶  PreLegalizerCombiner     Simplify before legalisation
+  │    O0PreLegalizerCombiner   (simpler version for -O0)
+  │
+  ├─▶  Legalizer                Make all ops legal for AArch64
+  │                             e.g. G_ADD i128 → split into two G_ADD i64
+  │
+  ├─▶  PostLegalizerCombiner    Simplify after legalisation
+  │    PostLegalizerLowering    Lower remaining generic ops
+  │
+  ├─▶  RegBankSelect            Assign each vreg to GPR or FPR bank
+  │
+  ├─▶  InstructionSelector      Match to real AArch64 instructions
+  │
+  └─▶  PostSelectOptimize       Clean up after selection
 ```
 
 For most AArch64 code today, SelectionDAG is still the default. GlobalISel is
@@ -341,57 +393,192 @@ This is where the bulk of the backend work happens. The passes run in order:
 ```
 MachineInstr (MIR)
   │
-  ├─▶  AArch64ExpandPseudo
+  ├─▶  AArch64ExpandPseudoInsts.cpp
   │       Expands pseudo-instructions into real instruction sequences.
   │       Example:
   │         MOVaddr %dst, @global_var
   │         ──────────────────────────▶
-  │         ADRP %dst, @global_var     ; load page address
-  │         ADD  %dst, %dst, :lo12:@global_var  ; add page offset
+  │         ADRP %dst, @global_var
+  │         ADD  %dst, %dst, :lo12:@global_var
+  │       Also expands atomic pseudo-instructions (CMP_SWAP, etc.) into
+  │       LDXR/STXR exclusive load-store loops.
+  │
+  ├─▶  AArch64ExpandImm.cpp
+  │       Expands large immediate values that cannot fit in a single
+  │       instruction into MOVZ + MOVK sequences.
+  │         MOV X0, #0x1234567890ABCDEF
+  │         ──────────────────────────▶
+  │         MOVZ X0, #0xCDEF
+  │         MOVK X0, #0x90AB, LSL #16
+  │         MOVK X0, #0x5678, LSL #32
+  │         MOVK X0, #0x1234, LSL #48
+  │
+  ├─▶  AArch64A57FPLoadBalancing.cpp
+  │       Cortex-A57 specific: balances FP/SIMD instructions across the
+  │       two FP pipelines to avoid bottlenecks. Reassigns FP register
+  │       colours to spread work evenly.
+  │
+  ├─▶  AArch64AdvSIMDScalarPass.cpp
+  │       Promotes scalar FP operations to use the AdvSIMD scalar
+  │       register file when profitable. Avoids costly GPR↔FPR moves.
+  │
+  ├─▶  AArch64SIMDInstrOpt.cpp
+  │       Optimises SIMD instruction sequences. For example, replaces
+  │       suboptimal vector patterns with more efficient equivalents.
+  │
+  ├─▶  AArch64StorePairSuppress.cpp
+  │       Analyses store patterns and sets the MOSuppressPair flag on
+  │       stores that should NOT be merged into STP by the load/store
+  │       optimizer. Prevents harmful pairing on some microarchitectures.
   │
   ├─▶  Register Allocation (RegAlloc)
   │       Assigns real AArch64 registers (X0–X30, W0–W30, etc.) to
   │       virtual registers. If there are not enough registers, spills
   │       values to the stack.
+  │         Before:  ADD %vreg5, %vreg2, %vreg3
+  │         After:   ADD X2, X0, X1
   │
-  │       Before:  ADD %vreg5, %vreg2, %vreg3
-  │       After:   ADD X2, X0, X1
+  ├─▶  AArch64PBQPRegAlloc.cpp
+  │       AArch64-specific hints for the PBQP (Partitioned Boolean
+  │       Quadratic Programming) register allocator. Provides cost
+  │       hints to avoid anti-dependencies on specific microarchitectures
+  │       (e.g. Cortex-A57 FP pipeline pairing).
   │
-  ├─▶  Prologue / Epilogue Insertion (AArch64FrameLowering)
+  ├─▶  AArch64PostCoalescerPass.cpp
+  │       Runs after register coalescing. Cleans up redundant copies
+  │       that the coalescer could not eliminate, particularly for
+  │       FP/SIMD register moves.
+  │
+  ├─▶  Prologue / Epilogue Insertion
+  │    AArch64PrologueEpilogue.cpp + AArch64FrameLowering.cpp
   │       Inserts the function prologue (save callee-saved registers,
   │       allocate stack frame) and epilogue (restore registers, return).
-  │       Example prologue:
-  │         STP X29, X30, [SP, #-16]!   ; save frame pointer + link register
+  │         STP X29, X30, [SP, #-16]!   ; save FP + LR
   │         MOV X29, SP                 ; set up frame pointer
+  │         SUB SP, SP, #local_size     ; allocate locals
+  │
+  ├─▶  AArch64LowerHomogeneousPrologEpilog.cpp
+  │       Replaces repeated identical prologue/epilogue sequences with
+  │       calls to a shared helper function. Reduces code size when
+  │       many functions save the same set of callee-saved registers.
   │
   ├─▶  Instruction Scheduling
+  │    AArch64MachineScheduler.cpp + AArch64MacroFusion.cpp
   │       Reorders instructions to avoid pipeline stalls and hide memory
-  │       latency. On AArch64, a load result is not available for 4–5
-  │       cycles — the scheduler tries to put other work in between.
+  │       latency. AArch64MacroFusion.cpp teaches the scheduler about
+  │       instruction pairs that fuse into a single micro-op on specific
+  │       CPUs (e.g. ADRP+ADD, CMP+B.cond).
   │
-  ├─▶  AArch64A57FPLoadBalancing
-  │       Cortex-A57 specific: balances FP/SIMD instructions across the
-  │       two FP pipelines to avoid bottlenecks.
+  ├─▶  AArch64LoadStoreOptimizer.cpp
+  │       Merges adjacent loads/stores into LDP/STP pair instructions.
+  │         STR X0, [SP, #0]     ─▶   STP X0, X1, [SP, #0]
+  │         STR X1, [SP, #8]
+  │       Also converts post-index patterns and promotes narrow loads.
   │
-  ├─▶  Peephole Optimisation (AArch64MIPeepholeOpt)
+  ├─▶  AArch64CodeLayoutOpt.cpp
+  │       Reorders basic blocks to improve instruction cache utilisation.
+  │       Moves cold (rarely executed) blocks away from hot paths.
+  │
+  ├─▶  AArch64CondBrTuning.cpp
+  │       Converts conditional branch sequences into more efficient forms.
+  │       Example: replaces CMP+B.cond with CBZ/CBNZ where possible.
+  │
+  ├─▶  AArch64ConditionalCompares.cpp
+  │       Converts if-else chains into conditional compare sequences
+  │       (CCMP/CCMN) to eliminate branches.
+  │         if (a == 0 || b == 0)  →  CMP a, #0
+  │                                   CCMP b, #0, #4, NE
+  │                                   B.EQ target
+  │
+  ├─▶  AArch64ConditionOptimizer.cpp
+  │       Optimises condition code usage. Removes redundant flag-setting
+  │       instructions when the flags are already set correctly.
+  │
+  ├─▶  AArch64RedundantCondBranchPass.cpp
+  │       Removes conditional branches whose condition is always true
+  │       or always false based on preceding instructions.
+  │
+  ├─▶  AArch64RedundantCopyElimination.cpp
+  │       Removes register copies that are provably redundant.
+  │       Example: if X0 is known to already equal X1, removes MOV X0, X1.
+  │
+  ├─▶  AArch64DeadRegisterDefinitionsPass.cpp
+  │       Replaces destination registers of instructions whose results
+  │       are never used with XZR/WZR (the zero register). This can
+  │       enable further optimisations and avoids false dependencies.
+  │
+  ├─▶  AArch64CollectLOH.cpp
+  │       Collects Linker Optimisation Hints (LOH) — annotations that
+  │       tell the linker it can optimise ADRP+LDR/ADD pairs into
+  │       shorter sequences when the final address is known at link time.
+  │
+  ├─▶  AArch64CompressJumpTables.cpp
+  │       Compresses jump table entries from 4 bytes to 1 or 2 bytes
+  │       when the table entries are close enough to the table base.
+  │       Reduces code size for switch statements.
+  │
+  ├─▶  AArch64CleanupLocalDynamicTLSPass.cpp
+  │       Cleans up redundant TLS (Thread Local Storage) descriptor
+  │       loads in the local-dynamic TLS model. Merges multiple
+  │       __tls_get_addr calls for the same TLS block into one.
+  │
+  ├─▶  AArch64FalkorHWPFFix.cpp
+  │       Falkor (Qualcomm) specific: fixes hardware prefetcher
+  │       conflicts. Renames registers to prevent the Falkor prefetcher
+  │       from incorrectly predicting strided access patterns.
+  │
+  ├─▶  AArch64A53Fix835769.cpp
+  │       Cortex-A53 erratum 835769 workaround. Inserts a NOP before
+  │       certain multiply-accumulate instructions that follow a memory
+  │       instruction to avoid a CPU bug.
+  │
+  ├─▶  AArch64SLSHardening.cpp
+  │       Straight-Line Speculation hardening. Inserts speculation
+  │       barriers (DSB+ISB or SB) after indirect branches and returns
+  │       to prevent speculative execution past those points.
+  │
+  ├─▶  AArch64SpeculationHardening.cpp
+  │       Broader speculation hardening (Spectre mitigations). Masks
+  │       register values that are derived from speculatively loaded
+  │       data to prevent information leakage.
+  │
+  ├─▶  AArch64PointerAuth.cpp
+  │       Inserts pointer authentication instructions (PACIA, AUTIA,
+  │       etc.) for PAC (Pointer Authentication Code) security feature.
+  │       Signs return addresses and function pointers.
+  │
+  ├─▶  AArch64BranchTargets.cpp
+  │       Inserts BTI (Branch Target Identification) instructions at
+  │       valid indirect branch targets. Part of the landing pad
+  │       security feature.
+  │
+  ├─▶  MachineSMEABIPass.cpp
+  │       Handles SME (Scalable Matrix Extension) ABI requirements.
+  │       Inserts SMSTART/SMSTOP instructions at function boundaries
+  │       when calling between streaming and non-streaming functions.
+  │
+  ├─▶  AArch64MIPeepholeOpt.cpp
   │       Looks at small windows of instructions and replaces them with
   │       shorter/faster equivalents.
-  │       Example:
   │         MOV W0, W0    ← redundant, remove it
-  │         UBFX + ORR    ← can sometimes become a single BFI
+  │         UBFX + ORR    ← can become a single BFI
+  │
+  ├─▶  SMEPeepholeOpt.cpp
+  │       SME-specific peephole optimisations. Removes redundant
+  │       SMSTART/SMSTOP pairs and streaming mode transitions.
   │
   ├─▶  AArch64MovePrefixPass (MOVPRFX for SVE)
   │       Inserts MOVPRFX instructions before SVE destructive operations
   │       to break false register dependencies.
   │
-  └─▶  AArch64BranchRelaxation
+  └─▶  AArch64BranchRelaxation (via generic BranchRelaxation pass)
           If a branch target is too far away for the instruction's
           bit field (e.g. a conditional branch only has ±1 MB range),
           inserts a trampoline:
-            B.EQ  far_target          ← too far, does not fit in 19 bits
-            ──────────────────────▶
-            B.NE  skip                ← inverted condition, short jump
-            B     far_target          ← unconditional, 26-bit range (±128 MB)
+            B.EQ  far_target     ← too far, does not fit in 19 bits
+            ──────────────────▶
+            B.NE  skip           ← inverted condition, short jump
+            B     far_target     ← unconditional, 26-bit range (±128 MB)
           skip:
 ```
 
@@ -456,11 +643,46 @@ MCInst
 The relevant files all live in:
 
 ```
-llvm/lib/Target/AArch64/MCTargetDesc/
-  ├── AArch64MCCodeEmitter.cpp    ← encodes MCInst → 32-bit words
-  ├── AArch64AsmBackend.cpp       ← applies relocations, fixups
-  ├── AArch64ELFObjectWriter.cpp  ← ELF-specific output
-  └── AArch64MachObjectWriter.cpp ← Mach-O specific output
+MCTargetDesc/
+  ├── AArch64MCCodeEmitter.cpp      Encodes MCInst → 32-bit words
+  │                                 Reads TableGen-generated bit field tables
+  ├── AArch64AsmBackend.cpp         Applies relocations and fixups after
+  │                                 encoding. Handles PC-relative fixups
+  │                                 whose final value is only known at
+  │                                 link time.
+  ├── AArch64FixupKinds.h           Defines the relocation types AArch64
+  │                                 uses (e.g. R_AARCH64_CALL26)
+  ├── AArch64ELFObjectWriter.cpp    ELF-specific output (Linux, Android)
+  ├── AArch64ELFStreamer.cpp        ELF-specific MCStreamer — handles
+  ├── AArch64ELFStreamer.h          mapping symbols (.text, $x, $d)
+  ├── AArch64MachObjectWriter.cpp   Mach-O specific output (Apple)
+  ├── AArch64WinCOFFObjectWriter.cpp  COFF output (Windows)
+  ├── AArch64WinCOFFStreamer.cpp    Windows-specific MCStreamer
+  ├── AArch64WinCOFFStreamer.h
+  ├── AArch64InstPrinter.cpp        Converts MCInst → human-readable text
+  ├── AArch64InstPrinter.h          e.g. MCInst{ADD,X0,X1,X2} → "add x0,x1,x2"
+  ├── AArch64MCAsmInfo.cpp          Defines assembler syntax rules
+  ├── AArch64MCAsmInfo.h            (comment chars, directive names, etc.)
+  ├── AArch64MCExpr.cpp             Handles AArch64-specific MC expressions
+  │                                 like :lo12:, :got:, :tlsdesc: modifiers
+  ├── AArch64MCTargetDesc.cpp       Registers all MC components with LLVM
+  ├── AArch64MCTargetDesc.h
+  ├── AArch64TargetStreamer.cpp      AArch64-specific MCStreamer directives
+  ├── AArch64TargetStreamer.h        (.arch, .cpu, .inst directives)
+  ├── AArch64MCLFIRewriter.cpp      Rewrites LFI (Landing Pad) annotations
+  ├── AArch64MCLFIRewriter.h        in the MC layer for BTI support
+  └── AArch64AddressingModes.h      Shared header: encodes/decodes addressing
+                                    mode immediates (scaled, unscaled, etc.)
+```
+
+Also involved in emission:
+
+```
+AArch64AsmPrinter.cpp     MachineInstr → MCInst conversion
+                          Handles special pseudo-instructions that need
+                          custom lowering (e.g. TLSDESC calls, BTI)
+AArch64MCInstLower.cpp    Helper for AsmPrinter: lowers MachineOperands
+AArch64MCInstLower.h      (symbols, frame indices) to MCOperands
 ```
 
 ---
@@ -530,38 +752,142 @@ start here to find which pass is responsible.
 ## Where Each Source File Lives in the Pipeline
 
 ```
-Pipeline Stage          Source File(s)
-──────────────────────  ──────────────────────────────────────────────────────
-IR Passes               AArch64ISelLowering.cpp
-                        AArch64ISelLowering.h
-                        SVEIntrinsicOpts.cpp
-                        AArch64StackTagging.cpp
-                        AArch64PromoteConstant.cpp
+Pipeline Stage            Source File(s)
+────────────────────────  ────────────────────────────────────────────────────
+Target Registration       AArch64TargetMachine.cpp / .h
+                          AArch64Subtarget.cpp / .h       CPU feature detection
+                          AArch64.td                      Top-level TableGen
+                          AArch64Features.td              CPU feature flags
+                          AArch64Processors.td            CPU model definitions
+                          AArch64PassRegistry.def         Pass registration
+                          TargetInfo/                     LLVM target registration
 
-Instruction Selection   AArch64ISelDAGToDAG.cpp        ← SelectionDAG path
-(SelectionDAG)          AArch64ISelDAGToDAG.h
-                        AArch64InstrInfo.td             ← patterns (TableGen)
-                        AArch64InstrFormats.td          ← encodings (TableGen)
+IR Passes                 AArch64ISelLowering.cpp / .h    Main IR lowering
+(pre-ISel)                AArch64TargetTransformInfo.cpp  Cost model
+                          AArch64TargetTransformInfo.h
+                          AArch64TargetObjectFile.cpp     Section assignment
+                          AArch64TargetObjectFile.h
+                          SVEIntrinsicOpts.cpp            SVE intrinsic opts
+                          SVEShuffleOpts.cpp              SVE shuffle opts
+                          AArch64StackTagging.cpp         MTE stack tagging
+                          AArch64StackTaggingPreRA.cpp    MTE pre-regalloc
+                          AArch64PromoteConstant.cpp      Constant pool
+                          AArch64Arm64ECCallLowering.cpp  Arm64EC ABI
+                          AArch64SelectionDAGInfo.cpp     DAG memory ops
+                          AArch64SelectionDAGInfo.h
 
-Instruction Selection   GISel/AArch64InstructionSelector.cpp  ← GlobalISel
-(GlobalISel)            GISel/AArch64CallLowering.cpp
-                        GISel/AArch64LegalizerInfo.cpp
-                        GISel/AArch64RegisterBankInfo.cpp
+TableGen Definitions      AArch64InstrInfo.td             Instruction patterns
+                          AArch64InstrFormats.td          Bit encodings
+                          AArch64InstrAtomics.td          Atomic instructions
+                          AArch64InstrGISel.td            GlobalISel patterns
+                          AArch64SVEInstrInfo.td          SVE instructions
+                          SVEInstrFormats.td              SVE encoding formats
+                          AArch64SMEInstrInfo.td          SME instructions
+                          SMEInstrFormats.td              SME encoding formats
+                          AArch64LFI.td                   Landing pad instrs
+                          AArch64RegisterInfo.td          Register definitions
+                          AArch64RegisterBanks.td         Register bank defs
+                          AArch64CallingConvention.td     Calling conventions
+                          AArch64Combine.td               GlobalISel combines
+                          AArch64Schedule.td              Scheduling base
+                          AArch64SchedA53.td              Cortex-A53 sched
+                          AArch64SchedA55.td              Cortex-A55 sched
+                          AArch64SchedA57.td              Cortex-A57 sched
+                          AArch64SchedNeoverseN1.td       Neoverse N1 sched
+                          AArch64SchedNeoverseV1.td       Neoverse V1 sched
+                          (+ many more AArch64Sched*.td)
 
-MIR Passes              AArch64ExpandPseudo.cpp
-                        AArch64FrameLowering.cpp        ← prologue/epilogue
-                        AArch64LoadStoreOptimizer.cpp
-                        AArch64A57FPLoadBalancing.cpp
-                        AArch64MIPeepholeOpt.cpp
-                        AArch64BranchRelaxation.cpp
-                        AArch64MovePrefixPass.cpp
+Instruction Selection     AArch64ISelDAGToDAG.cpp         SelectionDAG selector
+(SelectionDAG)            AArch64ISelDAGToDAG.h
+                          AArch64FastISel.cpp             Fast ISel (-O0)
+                          AArch64InstrInfo.cpp / .h       Instruction utilities
 
-Emission (MCInst)       AArch64AsmPrinter.cpp           ← MachineInstr → MCInst
-                        MCTargetDesc/AArch64MCCodeEmitter.cpp  ← MCInst → bits
-                        MCTargetDesc/AArch64AsmBackend.cpp
-                        AArch64InstPrinter.cpp          ← MCInst → text
+Instruction Selection     GISel/AArch64InstructionSelector.cpp
+(GlobalISel)              GISel/AArch64CallLowering.cpp / .h
+                          GISel/AArch64LegalizerInfo.cpp / .h
+                          GISel/AArch64RegisterBankInfo.cpp / .h
+                          GISel/AArch64GlobalISelUtils.cpp / .h
+                          GISel/AArch64PreLegalizerCombiner.cpp
+                          GISel/AArch64O0PreLegalizerCombiner.cpp
+                          GISel/AArch64PostLegalizerCombiner.cpp
+                          GISel/AArch64PostLegalizerLowering.cpp
+                          GISel/AArch64PostSelectOptimize.cpp
 
-Pipeline Registration   AArch64TargetMachine.cpp        ← AArch64PassConfig
+Pre-RegAlloc MIR          AArch64ExpandPseudoInsts.cpp    Pseudo expansion
+                          AArch64ExpandImm.cpp / .h       Immediate expansion
+                          AArch64A57FPLoadBalancing.cpp   A57 FP balancing
+                          AArch64AdvSIMDScalarPass.cpp    SIMD scalar promo
+                          AArch64SIMDInstrOpt.cpp         SIMD optimisation
+                          AArch64StorePairSuppress.cpp    STP suppression
+                          AArch64PBQPRegAlloc.cpp / .h    PBQP hints
+
+Register Allocation       AArch64RegisterInfo.cpp / .h    Register constraints
+                          AArch64CallingConvention.cpp / .h  CC implementation
+                          AArch64MachineFunctionInfo.cpp  Per-function state
+                          AArch64MachineFunctionInfo.h
+                          AArch64GenRegisterBankInfo.def
+                          AArch64SRLTDefineSuperRegs.cpp  Super-reg definitions
+
+Post-RegAlloc MIR         AArch64PrologueEpilogue.cpp / .h  Prologue/epilogue
+                          AArch64FrameLowering.cpp / .h   Frame layout
+                          AArch64LowerHomogeneousPrologEpilog.cpp
+                          AArch64PostCoalescerPass.cpp    Post-coalesce cleanup
+                          AArch64LoadStoreOptimizer.cpp   LDP/STP formation
+                          AArch64MachineScheduler.cpp / .h  Scheduling
+                          AArch64MacroFusion.cpp / .h     Macro-fusion hints
+                          AArch64CodeLayoutOpt.cpp        Block reordering
+                          AArch64CondBrTuning.cpp         Branch tuning
+                          AArch64ConditionalCompares.cpp  CCMP formation
+                          AArch64ConditionOptimizer.cpp   Flag optimisation
+                          AArch64RedundantCondBranchPass.cpp
+                          AArch64RedundantCopyElimination.cpp
+                          AArch64DeadRegisterDefinitionsPass.cpp
+                          AArch64CollectLOH.cpp           Linker hints
+                          AArch64CompressJumpTables.cpp   Jump table compress
+                          AArch64CleanupLocalDynamicTLSPass.cpp
+                          AArch64FalkorHWPFFix.cpp        Falkor prefetch fix
+                          AArch64A53Fix835769.cpp         A53 erratum fix
+
+Security Hardening        AArch64SLSHardening.cpp         SLS barriers
+                          AArch64SpeculationHardening.cpp Spectre mitigations
+                          AArch64PointerAuth.cpp / .h     PAC instructions
+                          AArch64BranchTargets.cpp        BTI instructions
+
+SME / SVE Late Passes     MachineSMEABIPass.cpp           SME ABI transitions
+                          AArch64SMEAttributes.cpp / .h   SME function attrs
+                          SMEPeepholeOpt.cpp              SME peephole
+
+Pre-Emit Passes           AArch64MIPeepholeOpt.cpp        MI peephole
+                          AArch64MovePrefixPass           SVE MOVPRFX
+                          AArch64PerfectShuffle.cpp / .h  Shuffle tables
+                          (BranchRelaxation via generic pass)
+
+Emission                  AArch64AsmPrinter.cpp           MachineInstr→MCInst
+                          AArch64MCInstLower.cpp / .h     Operand lowering
+                          MCTargetDesc/AArch64MCCodeEmitter.cpp  Bit encoding
+                          MCTargetDesc/AArch64AsmBackend.cpp     Fixups
+                          MCTargetDesc/AArch64FixupKinds.h
+                          MCTargetDesc/AArch64ELFObjectWriter.cpp
+                          MCTargetDesc/AArch64ELFStreamer.cpp / .h
+                          MCTargetDesc/AArch64MachObjectWriter.cpp
+                          MCTargetDesc/AArch64WinCOFFObjectWriter.cpp
+                          MCTargetDesc/AArch64WinCOFFStreamer.cpp / .h
+                          MCTargetDesc/AArch64InstPrinter.cpp / .h
+                          MCTargetDesc/AArch64MCAsmInfo.cpp / .h
+                          MCTargetDesc/AArch64MCExpr.cpp
+                          MCTargetDesc/AArch64MCTargetDesc.cpp / .h
+                          MCTargetDesc/AArch64TargetStreamer.cpp / .h
+                          MCTargetDesc/AArch64MCLFIRewriter.cpp / .h
+                          MCTargetDesc/AArch64AddressingModes.h
+
+Assembler / Disassembler  AsmParser/                      .s file parsing
+                          Disassembler/                   binary → MCInst
+
+Utilities                 Utils/                          Shared AArch64 utils
+                          AArch64.h                       Pass declarations
+                          AArch64FMV.td                   Function Multi-Versioning
+                          AArch64PfmCounters.td           Perf counter defs
+                          AArch64SystemOperands.td        System reg operands
 ```
 
 ---
@@ -605,6 +931,65 @@ Common suffixes:
 | `Relaxation` | Fixes up instructions that are out of range |
 | `FrameLowering` | Handles stack frame setup and teardown |
 | `ISelDAGToDAG` | Instruction selection via SelectionDAG |
+
+---
+
+## Files Not Yet Covered
+
+These files exist in the source tree but are not discussed in detail elsewhere
+in these notes yet. Brief descriptions for reference:
+
+```
+File                                  What it does
+────────────────────────────────────  ──────────────────────────────────────────
+AArch64PerfectShuffle.cpp / .h        Pre-computed lookup table for optimal
+                                      NEON shuffle instruction sequences.
+                                      Used during SIMD lowering.
+
+AArch64FMV.td                         Function Multi-Versioning definitions.
+                                      Allows one function to have multiple
+                                      implementations selected at runtime
+                                      based on CPU features (e.g. SVE vs NEON).
+
+AArch64PfmCounters.td                 Maps LLVM scheduling resources to
+                                      hardware performance counter events.
+                                      Used by llvm-mca for cycle-accurate
+                                      simulation.
+
+AArch64SystemOperands.td              Defines named system register operands
+                                      (SPSR_EL1, TTBR0_EL1, etc.) used by
+                                      MRS/MSR instructions.
+
+AArch64SchedPredicates.td             Scheduling predicates — conditions that
+AArch64SchedPredNeoverse.td           must be true for a scheduling rule to
+AArch64SchedPredExynos.td             apply (e.g. "is this a load that hits
+                                      the L1 cache?").
+
+AArch64SRLTDefineSuperRegs.cpp        Defines super-register relationships
+                                      for the SRLT (Sub-Register Liveness
+                                      Tracking) framework.
+
+AArch64SelectionDAGInfo.cpp / .h      Provides AArch64-specific information
+                                      to the SelectionDAG about memory
+                                      operations (memcpy, memset, memmove).
+                                      Can select optimised inline sequences.
+
+MCTargetDesc/AArch64MCLFIRewriter     Rewrites LFI (Landing Pad / BTI)
+                                      annotations in the MC layer. Ensures
+                                      BTI instructions are correctly placed
+                                      at indirect branch targets.
+
+Utils/                                Shared utility code used across
+                                      multiple AArch64 passes.
+
+AsmParser/                            Parses AArch64 assembly text (.s files)
+                                      into MCInst objects. Used by the
+                                      integrated assembler.
+
+Disassembler/                         Converts binary machine code back into
+                                      MCInst objects. Used by llvm-objdump
+                                      and debuggers.
+```
 
 ---
 
