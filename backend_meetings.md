@@ -1,4 +1,6 @@
 GI VS SD : https://www.youtube.com/watch?v=F6GGbYtae3g&list=PL_R5A0lGi1AA4Lv2bBFSwhgDaHvvpVU21&index=3
+
+GI Instruction Selection: https://discourse.llvm.org/t/the-state-of-art-at-instruction-selection/57674/3
  
 Tablegen Aarch64: https://youtu.be/vkVjIAlzdMw?si=C3zruIaXck8tZG3w
  
