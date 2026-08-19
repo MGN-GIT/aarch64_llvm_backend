@@ -1,4 +1,5 @@
 # LLVM Backend Learning Resources
+Architecture & Platform Information for Compiler Writers - https://www.llvm.org/docs/CompilerWriterInfo.html
 
 ## 1. LLVM IR
 
