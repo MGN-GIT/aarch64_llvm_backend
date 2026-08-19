@@ -15,10 +15,54 @@ Creating a LLVM Backend: https://youtu.be/b53WqCbLEYg?si=Z8KKigGErzzQhJDO
 LLVM docs for backend: https://llvm.org/docs/WritingAnLLVMBackend.html
 
 LLVM IR : https://www.youtube.com/watch?v=m8G_S5LwlTo
+
+Optimization Passes in LLVM IR : https://www.youtube.com/watch?v=7GHXDEIMGIY
  
 SelectionDAG: https://youtu.be/nNQ6AF6i5FI?si=OBb16bQxxlg--uRD
 
 Modern CPP: https://youtube.com/playlist?list=PLgnQpQtFTOGRM59sr3nSL8BmeMZR9GCIA&si=G852AdIfjcGTzs8W
 
 Concurrency in cpp: https://youtube.com/playlist?list=PLvv0ScY6vfd_ocTP2ZLicgqKnvq50OCXM&si=Xz6RwIiIWx_smAgh
- 
+
+```
+                    LLVM IR
+                       │
+                       ▼
+              Target IR optimizations
+                       │
+                       ▼
+              Instruction Selection
+          ┌────────────┴────────────┐
+          │                         │
+     SelectionDAG                GlobalISel
+          │                         │
+          └────────────┬────────────┘
+                       ▼
+                   Machine IR
+                       │
+                       ▼
+             ┌───────────────────┐
+             │ Pre-RA optimization│
+             │ + scheduling      │
+             └─────────┬─────────┘
+                       │
+                       ▼
+              Register Allocation
+                       │
+                       ▼
+             ┌───────────────────┐
+             │ Post-RA scheduling│
+             │ + optimizations   │
+             └─────────┬─────────┘
+                       │
+                       ▼
+             Prologue / Epilogue
+                       │
+                       ▼
+                Late MI passes
+                       │
+                       ▼
+                  Assembly
+
+
+```
