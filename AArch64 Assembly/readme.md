@@ -2,6 +2,8 @@
 
 Complete guide: https://mariokartwii.com/arm64/index.html
 
+Refer to the AArch64 All Assembly instructions guide for know about all instructions
+
 The below is a summary of the above tutorial.
 
 ---
