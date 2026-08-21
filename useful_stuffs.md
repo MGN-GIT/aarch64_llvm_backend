@@ -44,7 +44,7 @@ Generates mir after the pass but stop before asm printer/obj emission:  llc.exe 
 
 # MIR Manipulation — Practical APIs for Beginners
 
-The table above is fairly abstract/legacy-flavored (from the manual itself). This section is the practical set of MIR-manipulation APIs a beginner writing a new pass would actually reach for day-to-day (mostly from `MachineInstr.h`, `MachineBasicBlock.h`, `MachineFunction.h`, `MachineRegisterInfo.h`, `MachineInstrBuilder.h`).
+This section is the practical set of MIR-manipulation APIs a beginner writing a new pass would actually reach for day-to-day (mostly from `MachineInstr.h`, `MachineBasicBlock.h`, `MachineFunction.h`, `MachineRegisterInfo.h`, `MachineInstrBuilder.h`).
 
 ## Inspecting an instruction
 
