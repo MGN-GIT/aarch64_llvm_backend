@@ -93,6 +93,16 @@ Architecture & Platform Information for Compiler Writers - https://www.llvm.org/
 - [Modern C++](https://youtube.com/playlist?list=PLgnQpQtFTOGRM59sr3nSL8BmeMZR9GCIA)
 - [Concurrency in C++](https://youtube.com/playlist?list=PLvv0ScY6vfd_ocTP2ZLicgqKnvq50OCXM)
 
+## 18. Introducing Scalable Vector Extensions(SVE) to LLVM
+
+- [SVE](https://llvm.org/devmtg/2016-11/Slides/Emerson-ScalableVectorizationinLLVMIR.pdf)
+- [Dev Team Meeting](https://youtu.be/0up2hJk7k94)
+
+## 19. Introduction to JIT for MCJIT target
+
+- [JIT Compilation tutorial slides](https://llvm.org/devmtg/2022-11/slides/Tutorial2-JITLink.pdf)
+- [Dev Team Meeting] (https://www.youtube.com/watch?v=UwHgCqQ2DDA)
+
 ```
 1. LLVM IR
        ↓
