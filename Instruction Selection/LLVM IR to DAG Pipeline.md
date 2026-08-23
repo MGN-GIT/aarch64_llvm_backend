@@ -1,9 +1,4 @@
 # SelectionDAG Deep Dive — From Optimized IR to Machine Instructions
-
-> Companion to `02_llvm_compilation_pipeline.md`. That file gives the big
-> picture of all five pipeline stages; this file zooms into **Stage 2** and
-> answers, with exact function/file names from this checkout:
->
 > - Who generates DAG nodes from LLVM IR?
 > - What exactly happens in `AArch64ISelLowering.cpp`?
 > - What happens after lowering (legalize/combine/schedule)?
