@@ -1,4 +1,9 @@
 # SelectionDAG Deep Dive — From Optimized IR to Machine Instructions
+
+> Companion to `02_llvm_compilation_pipeline.md`. That file gives the big
+> picture of all five pipeline stages; this file zooms into **Stage 2** and
+> answers, with exact function/file names from this checkout:
+>
 > - Who generates DAG nodes from LLVM IR?
 > - What exactly happens in `AArch64ISelLowering.cpp`?
 > - What happens after lowering (legalize/combine/schedule)?
@@ -27,8 +32,10 @@
 
 By the time codegen starts, the middle-end (`opt` pipeline, or clang's
 `-O2` IR pass pipeline) has already finished and produced a **Module** full
-of **optimized LLVM IR functions**. Codegen begins when a driver
-(`llc`, or clang's backend action) calls into the target machine:
+of **optimized LLVM IR functions**. Codegen begins when a driver (`llc`, or
+clang's backend action) calls into the target machine. Below is the *exact*
+call chain, traced through the real source in this checkout — no invented
+class names.
 
 ```
 opt-level IR passes (InstCombine, GVN, LICM, Inliner, ...)
@@ -36,37 +43,156 @@ opt-level IR passes (InstCombine, GVN, LICM, Inliner, ...)
         ▼
    Optimized LLVM IR  (a Module, still 100% target-independent)
         │
+        ▼  llc.cpp: compileModule()
+   Target->addPassesToEmitFile(PM, Out, ..., FileType, NoVerify, MMIWP)
+        │        (Target is a TargetMachine* — for AArch64, an
+        │         AArch64leTargetMachine/AArch64beTargetMachine instance)
         ▼
- TargetMachine::addPassesToEmitFile()          <-- entry point from llc/clang
-        │
+   CodeGenTargetMachineImpl::addPassesToEmitFile()      (generic — llvm/lib/CodeGen/CodeGenTargetMachineImpl.cpp)
+        │  calls the static helper in the SAME file:
         ▼
- LLVMTargetMachine::addPassesToGenerateCode()   <-- generic (target-independent)
+   addPassesToGenerateCode(TM, PM, DisableVerify, MMIWP)  (generic, file-static helper)
         │
-        ▼
- TargetPassConfig::addISelPasses()              <-- generic, but calls target hooks
+        ├─ PassConfig = TM.createPassConfig(PM)
+        │      -> AArch64TargetMachine::createPassConfig()        (AArch64TargetMachine.cpp)
+        │      -> returns `new AArch64PassConfig(*this, PM)`
         │
-        ├─ addIRPasses()          -> still IR passes (AArch64PassConfig::addIRPasses)
-        ├─ addPreISel()           -> still IR passes (AArch64-specific IR prep)
-        ├─ addCodeGenPrepare()    -> still IR passes (CodeGenPrepare, TypePromotion)
-        └─ addInstSelector()      -> AArch64PassConfig::addInstSelector()
-                                       addPass(createAArch64ISelDag(...))
+        ├─ PassConfig->addISelPasses()      <-- generic, TargetPassConfig.cpp, but calls virtual AArch64 hooks (see below)
+        └─ PassConfig->addMachinePasses()   <-- generic, TargetPassConfig.cpp, calls virtual AArch64 hooks (addPreRegAlloc, addPostRegAlloc, addPreSched2, addPreEmitPass, ...)
 ```
 
-Everything above `addInstSelector()` is **still IR-level** — no DAG exists
-yet. `createAArch64ISelDag()` (declared in `AArch64ISelDAGToDAG.cpp`) wraps
-`AArch64DAGToDAGISel` inside a `SelectionDAGISelLegacy` **MachineFunctionPass**
-and adds it to the pass manager. This is the pass that, when it eventually
-runs (once per `Function`), is responsible for the entire DAG-build →
-lower → legalize → select → schedule → emit sequence described below.
+`AArch64PassConfig` (defined in `AArch64TargetMachine.cpp`) is a subclass of
+the generic `TargetPassConfig` (`llvm/lib/CodeGen/TargetPassConfig.cpp`).
+`TargetPassConfig::addISelPasses()` is **not** overridden by AArch64 — it's
+the generic driver that decides the overall order and, at specific points,
+calls virtual hooks that AArch64 *does* override. Here is its real body
+(`TargetPassConfig.cpp`):
+
+```cpp
+bool TargetPassConfig::addISelPasses() {
+  if (TM->useEmulatedTLS())
+    addPass(createLowerEmuTLSPass());
+
+  PM->add(createTargetTransformInfoWrapperPass(TM->getTargetIRAnalysis()));
+  if (getOptLevel() != CodeGenOptLevel::None)
+    addPass(createObjCARCContractPass());
+  addPass(createPreISelIntrinsicLoweringPass());
+  addPass(createExpandIRInstsPass(getOptLevel()));
+
+  addIRPasses();              // <-- virtual! dispatches to AArch64PassConfig::addIRPasses
+  addCodeGenPrepare();        // <-- virtual! dispatches to AArch64PassConfig::addCodeGenPrepare
+  addPassesToHandleExceptions();   // generic, NOT overridden by AArch64 (SjLj/DwarfEH/WinEH/Wasm/None)
+  addISelPrepare();            // generic; internally calls addPreISel() -- see below
+
+  return addCoreISelPasses();  // generic; decides FastISel/GlobalISel/SelectionDAG,
+                               // and near the end calls addInstSelector() -- see below
+}
+```
+
+`addISelPrepare()` (also generic, `TargetPassConfig.cpp`) is where
+`addPreISel()` is actually invoked — it is **not** a sibling of
+`addIRPasses()`, it's nested one level deeper:
+
+```cpp
+void TargetPassConfig::addISelPrepare() {
+  addPreISel();                       // <-- virtual! dispatches to AArch64PassConfig::addPreISel
+  if (requiresCodeGenSCCOrder()) addPass(new DummyCGSCCPass);
+  addPass(createInlineAsmPreparePass());
+  addPass(createSafeStackPass());
+  addPass(createStackProtectorPass());
+  ...
+  addPass(createVerifierPass());      // IR verifier — last chance to catch a bad IR pass
+}
+```
+
+And `addCoreISelPasses()` (generic) is where `addInstSelector()` is finally
+invoked, near the very end, once FastISel/GlobalISel/SelectionDAG has been
+chosen:
+
+```cpp
+bool TargetPassConfig::addCoreISelPasses() {
+  // ... selects Selector = SelectionDAG / FastISel / GlobalISel ...
+  if (Selector != SelectorType::GlobalISel || !isGlobalISelAbortEnabled())
+    if (addInstSelector())            // <-- virtual! dispatches to AArch64PassConfig::addInstSelector
+      return true;
+  addPass(&FinalizeISelID);
+  ...
+}
+```
+
+### So, precisely: where is each hook called *for AArch64*?
+
+All three hooks below live in `AArch64TargetMachine.cpp` as overrides on
+`AArch64PassConfig`. None of them is called directly by AArch64 code —
+AArch64 never calls `addISelPasses()` or `addISelPrepare()` itself. Instead,
+the **generic** `TargetPassConfig` machinery calls these virtual methods
+through the vtable, at the fixed points shown above:
+
+| AArch64 override | Defined in | Invoked by (generic) | When |
+|---|---|---|---|
+| `AArch64PassConfig::addIRPasses()` | `AArch64TargetMachine.cpp` | `TargetPassConfig::addISelPasses()` | early, right after `ExpandIRInstsPass` |
+| `AArch64PassConfig::addPreISel()` | `AArch64TargetMachine.cpp` | `TargetPassConfig::addISelPrepare()` | inside `addISelPrepare()`, before SafeStack/StackProtector |
+| `AArch64PassConfig::addCodeGenPrepare()` | `AArch64TargetMachine.cpp` | `TargetPassConfig::addISelPasses()` | right after `addIRPasses()` returns |
+| `AArch64PassConfig::addInstSelector()` | `AArch64TargetMachine.cpp` | `TargetPassConfig::addCoreISelPasses()` | last step of `addISelPasses()`, once selector kind is chosen |
+
+Each override typically adds its own AArch64-specific passes and then (for
+`addIRPasses`/`addCodeGenPrepare`) explicitly calls the base-class version to
+still get the generic passes:
 
 ```cpp
 // AArch64TargetMachine.cpp
+void AArch64PassConfig::addIRPasses() {
+  addPass(createAtomicExpandLegacyPass());
+  if (EnableSVEIntrinsicOpts && TM->getOptLevel() != CodeGenOptLevel::None)
+    addPass(createSVEIntrinsicOptsPass());
+  ... // several more AArch64-only IR passes ...
+
+  TargetPassConfig::addIRPasses();   // <-- don't forget the generic ones!
+                                     //     (Verifier, AA passes, LSR, GC lowering,
+                                     //      ConstantHoisting, ExpandReductions, ...)
+
+  if (getOptLevel() == CodeGenOptLevel::Aggressive && EnableSelectOpt)
+    addPass(createSelectOptimizePass());
+  addPass(createAArch64StackTaggingPass(...));
+  if (... EnableSVEShuffleOpt) addPass(createSVEShuffleOptsPass());
+  if (TM->getOptLevel() >= CodeGenOptLevel::Default)
+    addPass(createComplexDeinterleavingPass(TM));
+  ...
+}
+
+bool AArch64PassConfig::addPreISel() {
+  if (TM->getOptLevel() != CodeGenOptLevel::None && EnablePromoteConstant)
+    addPass(createAArch64PromoteConstantPass());
+  if (/* global merge enabled */)
+    addPass(createGlobalMergePass(TM, 4095, ...));
+  return false;
+}
+
+void AArch64PassConfig::addCodeGenPrepare() {
+  if (getOptLevel() != CodeGenOptLevel::None)
+    addPass(createTypePromotionLegacyPass());
+  TargetPassConfig::addCodeGenPrepare();   // <-- adds the generic CodeGenPrepare pass
+}
+
 bool AArch64PassConfig::addInstSelector() {
   addPass(createAArch64ISelDag(getAArch64TargetMachine(), getOptLevel()));
-  ...
+  if (TM->getTargetTriple().isOSBinFormatELF() &&
+      getOptLevel() != CodeGenOptLevel::None)
+    addPass(createAArch64CleanupLocalDynamicTLSPass());
   return false;
 }
 ```
+
+Everything up through `addISelPrepare()` (i.e. `addIRPasses`, `addPreISel`,
+`addCodeGenPrepare`, and exception-handling prep) runs **entirely on LLVM
+IR** — no `MachineFunction` or DAG exists yet for any of it. The very first
+`MachineFunctionPass` in the whole pipeline is the one added inside
+`addInstSelector()`: `createAArch64ISelDag()` (declared/defined in
+`AArch64ISelDAGToDAG.cpp`), which wraps `AArch64DAGToDAGISel` inside a
+`SelectionDAGISelLegacy` **MachineFunctionPass**. This is the pass that,
+once it actually runs (once per `Function`), is responsible for the entire
+DAG-build → lower → legalize → select → schedule → emit sequence described
+in the rest of this document.
 
 ---
 
@@ -331,9 +457,9 @@ The DAG is purely an internal implementation detail of that one pass.
 
 | Boundary | Who hands off | Who receives | Representation crossing the boundary |
 |---|---|---|---|
-| Optimizer → Codegen driver | `opt`/clang IR pipeline | `TargetMachine::addPassesToEmitFile` | Optimized `Module` (LLVM IR) |
-| Codegen driver → Pass pipeline builder | `addPassesToEmitFile` | `LLVMTargetMachine::addPassesToGenerateCode` → `TargetPassConfig::addISelPasses` | still IR, now inside a `PassManager` |
-| IR passes → MachineFunction creation | `TargetPassConfig` scheduling | `MachineFunctionAnalysis` (generic) | Empty `MachineFunction` (CFG skeleton only) |
+| Optimizer → Codegen driver | `opt`/clang IR pipeline | `llc.cpp: compileModule()` → `TargetMachine::addPassesToEmitFile` | Optimized `Module` (LLVM IR) |
+| Codegen driver → Pass pipeline builder | `CodeGenTargetMachineImpl::addPassesToEmitFile` | file-static `addPassesToGenerateCode()` → `AArch64PassConfig` (via `createPassConfig`) → `TargetPassConfig::addISelPasses`/`addMachinePasses` | still IR, now inside a `PassManager` |
+| IR passes → MachineFunction creation | `TargetPassConfig` scheduling (first `MachineFunctionPass` added, i.e. the one from `addInstSelector`) | `MachineFunctionAnalysis` (generic) | Empty `MachineFunction` (CFG skeleton only) |
 | Container → DAG builder | `SelectionDAGISelLegacy::runOnMachineFunction` | `SelectionDAGBuilder::visit()` (generic) | IR `Instruction`s → generic `ISD::` `SDNode`s |
 | DAG builder → Target lowering | `SelectionDAGBuilder` (via `TargetLowering` hooks) | `AArch64TargetLowering::LowerFormalArguments/LowerCall/LowerReturn/LowerOperation` | generic `ISD::` ↔ `AArch64ISD::` `SDNode`s |
 | Lowering → Combine/Legalize | `AArch64TargetLowering` | `SelectionDAG::Combine/LegalizeTypes/Legalize` (generic) | legal, target-aware DAG |
